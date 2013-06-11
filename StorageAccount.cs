@@ -1,4 +1,5 @@
 ﻿using System;
+using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.Globalization;
 using System.Linq;
@@ -55,11 +56,9 @@ namespace UI
                                      Action<StorageAccount> onCompleted)
         {
             selectedContainer = container;
-
-            FindBackups(onCompleted);
         }
 
-        private void FindBackups(Action<StorageAccount> onCompleted)
+        public void FindBackups(Action<StorageAccount> onCompleted)
         {
             Task.Run(() =>
                          {
@@ -87,8 +86,8 @@ namespace UI
                          .Distinct());
         }
 
-        public void DeleteBackup(string backup, 
-                                 Action<int> reportCompleted, 
+        public void DeleteBackup(string backup,
+                                 Action<int> reportCompleted,
                                  Action<StorageAccount> onCompleted)
         {
             Task.Run(() =>
@@ -143,17 +142,46 @@ namespace UI
                              var list = selectedContainer.ListBlobs(useFlatBlobListing: true).ToList();
 
                              var count = list.Count;
-                             for (var index = 0; index < count; index++)
-                             {
-                                 var backupBlob = list[index];
+                             Parallel.For(0, count, index =>
+                                                        {
+                                                            var backupBlob = list[index];
 
-                                 var blockBlob = backupBlob as CloudBlockBlob;
-                                 if (blockBlob == null)
-                                     continue;
-                                 blockBlob.CreateSnapshot(dictionary);
+                                                            var blockBlob = backupBlob as CloudBlockBlob;
+                                                            if (blockBlob == null)
+                                                                return;
+                                                            blockBlob.CreateSnapshot(dictionary);
 
-                                 reportCompleted(Convert.ToInt32(((1d + index) / count) * 100));
-                             }
+                                                            reportCompleted(Convert.ToInt32(((1d + index)/count)*100));
+                                                        });
+                             onComplete(this);
+                         });
+        }
+
+        public void Purge(DateTime? olderThan, Action<int> reportCompleted, Action<StorageAccount> onComplete)
+        {
+            reportCompleted(-1);
+            Task.Run(() =>
+                         {
+                             var list = selectedContainer.ListBlobs(useFlatBlobListing: true).ToList();
+                             reportCompleted(0);
+                             var count = list.Count;
+
+                             var completed = new ConcurrentBag<int>();
+
+                             Parallel.For(0, count, index =>
+                                {
+                                    var backupBlob = list[index];
+
+                                    var blockBlob = backupBlob as CloudBlockBlob;
+                                    if (blockBlob != null)
+                                    {
+                                        if ((olderThan.HasValue && blockBlob.Properties.LastModified < olderThan) ||
+                                            !olderThan.HasValue)
+                                            blockBlob.Delete(DeleteSnapshotsOption.IncludeSnapshots);
+                                    }
+                                    completed.Add(index);
+                                    reportCompleted(Convert.ToInt32(((completed.Count) / count) * 100));
+                                });
                              onComplete(this);
                          });
         }
